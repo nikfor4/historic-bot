@@ -1,0 +1,23 @@
+{
+  "name": "Владимир Ленин",
+  "image": "C:\\Users\\pro10\\PycharmProjects\\Telegram_bot\\data\\images\\lenin.jpg",
+  "history": "Краткая история Ленина...",
+  "facts": ["Факт 1", "Факт 2"],
+  "links": ["https://ru.wikipedia.org/wiki/Ленин"],
+  "game": [
+    {
+      "question": "Что вы сделаете после революции?",
+      "choices": [
+        {"text": "Учредить НЭП", "next": 1},
+        {"text": "Ужесточить власть", "next": 2}
+      ]
+    },
+    {
+      "question": "Как вы решите проблему с армией?",
+      "choices": [
+        {"text": "Создать РККА", "next": "end_lenin_1"},
+        {"text": "Договориться с белыми", "next": "end_lenin_2"}
+      ]
+    }
+  ]
+}
