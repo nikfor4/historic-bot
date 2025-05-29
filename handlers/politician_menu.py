@@ -1,174 +1,130 @@
 import os
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile
-from telegram.ext import CallbackQueryHandler, ContextTypes
+from telegram.ext import CallbackQueryHandler, ContextTypes, ApplicationBuilder
 from services.politician_data import load_all_politicians
 from services.user_state import get_user_state
-from razdel import tokenize
+from utils.message_utils import delete_previous_message, split_text_into_pages
 
+# Загружаем данные политиков
 politicians = load_all_politicians()
-
-
-def split_text_into_pages(text: str, max_length: int = 1000):
-    words = list(tokenize(text))
-    pages = []
-    current_page = ""
-
-    for word in words:
-        if len(current_page) + len(word.text) + 1 <= max_length:
-            current_page += (word.text if current_page == "" else " " + word.text)
-        else:
-            pages.append(current_page)
-            current_page = word.text
-
-    if current_page:
-        pages.append(current_page)
-
-    return pages
-
-
-async def send_paginated_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, action: str, page: int,
-                              politician_name: str):
-    pages = split_text_into_pages(text)
-    total_pages = len(pages)
-
-    kb_buttons = []
-    if page > 0:
-        kb_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"{action}_page_{page - 1}"))
-    if page < total_pages - 1:
-        kb_buttons.append(InlineKeyboardButton("➡️ Далее", callback_data=f"{action}_page_{page + 1}"))
-    kb_buttons.append(InlineKeyboardButton("🔙 В меню", callback_data="select_politician"))
-
-    kb = InlineKeyboardMarkup([kb_buttons])
-
-    await update.callback_query.message.delete()
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=f"*{politician_name} — {action.upper()} (страница {page + 1}/{total_pages})*\n\n{pages[page]}",
-        parse_mode="Markdown",
-        reply_markup=kb
-    )
-
-
-# Функция для вывода ссылок в виде страниц
-async def send_paginated_links(update: Update, context: ContextTypes.DEFAULT_TYPE, links: list, action: str, page: int,
-                               politician_name: str):
-    total_pages = len(links)
-
-    kb_buttons = []
-    if page > 0:
-        kb_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"{action}_page_{page - 1}"))
-    if page < total_pages - 1:
-        kb_buttons.append(InlineKeyboardButton("➡️ Далее", callback_data=f"{action}_page_{page + 1}"))
-    kb_buttons.append(InlineKeyboardButton("🔙 В меню", callback_data="select_politician"))
-
-    kb = InlineKeyboardMarkup([kb_buttons])
-
-    await update.callback_query.message.delete()
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=f"*{politician_name} — {action.upper()} (страница {page + 1}/{total_pages})*\n\n{links[page]}",
-        parse_mode="Markdown",
-        reply_markup=kb
-    )
-
 
 async def handle_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
+    # Удаляем предыдущее сообщение (это меню после выбора политика)
+    if update.callback_query.message:
+        await delete_previous_message(update.callback_query.message, context)
+
     user_id = update.effective_user.id
-    index = get_user_state(user_id)
-    politician = politicians[index]
+    idx = get_user_state(user_id) or 0
+    pol = politicians[idx]
 
-    image_path = politician.get("image", "")
-    if not os.path.isabs(image_path):
-        image_path = os.path.abspath(os.path.join(os.getcwd(), image_path))
-
-    if not os.path.exists(image_path):
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Фото не найдено.")
-        return
-
+    # Формируем клавиатуру основного меню политика
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📖 История", callback_data="history")],
-        [InlineKeyboardButton("🧠 Факты", callback_data="facts")],
-        [InlineKeyboardButton("🔗 Ссылки", callback_data="links")],
-        [InlineKeyboardButton("🎮 Начать игру", callback_data="start_game")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="choose_politician")]
+        [InlineKeyboardButton('📖 История',    callback_data='history')],
+        [InlineKeyboardButton('🧠 Факты',      callback_data='facts')],
+        [InlineKeyboardButton('🏆 Достижения', callback_data='achievements')],
+        [InlineKeyboardButton('🔗 Ссылки',     callback_data='links')],
+        [InlineKeyboardButton('🎮 Начать игру', callback_data='start_game')],
+        [InlineKeyboardButton('🔙 Назад',       callback_data='choose_politician')],
     ])
 
-    await update.callback_query.message.delete()
+    # Если есть изображение, отправляем его с подписью
+    img_path = pol.get('image')
+    text = f"*{pol['name']} — Меню*"
+    if img_path and os.path.exists(img_path):
+        try:
+            with open(img_path, 'rb') as img:
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=img,
+                    caption=text,
+                    parse_mode='Markdown',
+                    reply_markup=kb
+                )
+                return
+        except Exception as e:
+            print(f"Error sending photo: {e}")
 
-    with open(image_path, "rb") as f:
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id,
-            photo=InputFile(f),
-            caption=f"Что вы хотите узнать о {politician['name']}?",
-            reply_markup=kb
-        )
-
-
-async def handle_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    user_id = update.effective_user.id
-    index = get_user_state(user_id)
-    politician = politicians[index]
-    action = update.callback_query.data
-
-    if action == "start_game":
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="🎮 Игра ещё в разработке.")
-    else:
-        if action == "facts":
-            facts = politician.get("facts", ["Факты не доступны."])
-            await send_paginated_facts(update, context, facts, action, 0, politician["name"])
-        elif action == "links":
-            links = politician.get("links", ["Ссылки не доступны."])
-            await send_paginated_links(update, context, links, action, 0, politician["name"])
-        else:
-            info = politician.get(action, "Информация пока недоступна.")
-            await send_paginated_text(update, context, info, action, 0, politician["name"])
-
-# Функция для вывода фактов в виде страниц
-async def send_paginated_facts(update: Update, context: ContextTypes.DEFAULT_TYPE, facts: list, action: str, page: int,
-                               politician_name: str):
-    total_pages = len(facts)
-
-    kb_buttons = []
-    if page > 0:
-        kb_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"{action}_page_{page - 1}"))
-    if page < total_pages - 1:
-        kb_buttons.append(InlineKeyboardButton("➡️ Далее", callback_data=f"{action}_page_{page + 1}"))
-    kb_buttons.append(InlineKeyboardButton("🔙 В меню", callback_data="select_politician"))
-
-    kb = InlineKeyboardMarkup([kb_buttons])
-
-    await update.callback_query.message.delete()
+    # Иначе текстовым сообщением
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text=f"*{politician_name} — {action.upper()} (страница {page + 1}/{total_pages})*\n\n{facts[page]}",
-        parse_mode="Markdown",
+        text=text,
+        parse_mode='Markdown',
         reply_markup=kb
     )
 
-async def handle_page_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
+    # Удаляем меню политика перед показом выбранного раздела
+    if update.callback_query.message:
+        await delete_previous_message(update.callback_query.message, context)
+
     user_id = update.effective_user.id
-    index = get_user_state(user_id)
-    politician = politicians[index]
+    idx = get_user_state(user_id) or 0
+    pol = politicians[idx]
+    action = update.callback_query.data
 
-    parts = update.callback_query.data.split("_page_")
-    action = parts[0]
-    page = int(parts[1])
+    # Навигация между экранами
+    if action == 'choose_politician':
+        from handlers.choose_politician import show_politician
+        await show_politician(update, context, idx)
+        return
+    if action == 'start_game':
+        from handlers.game_module import start_game
+        await start_game(update, context)
+        return
 
-    if action == "facts":
-        facts = politician.get("facts", ["Факты не доступны."])
-        await send_paginated_facts(update, context, facts, action, page, politician["name"])
-    elif action == "links":
-        links = politician.get("links", ["Ссылки не доступны."])
-        await send_paginated_links(update, context, links, action, page, politician["name"])
-    else:
-        info = politician.get(action, "Информация пока недоступна.")
-        await send_paginated_text(update, context, info, action, page, politician["name"])
+    # Готовим контент и разбиваем на страницы
+    content = pol.get(action)
+    pages = content if isinstance(content, list) \
+        else split_text_into_pages(content or 'Информация недоступна.')
+    context.user_data['pages'] = pages
+    context.user_data['page_action'] = action
+    context.user_data['pol_name'] = pol['name']
 
+    # Отправляем первую страницу
+    await send_page(update, context, 0)
+
+async def send_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int):
+    # При пагинации тоже надо удалить текущее сообщение
+    if update.callback_query and update.callback_query.message:
+        await delete_previous_message(update.callback_query.message, context)
+
+    pages = context.user_data['pages']
+    action = context.user_data['page_action']
+    name = context.user_data['pol_name']
+    total = len(pages)
+
+    # Навигационные кнопки
+    buttons = []
+    if page > 0:
+        buttons.append(InlineKeyboardButton('⬅️ Назад', callback_data=f'{action}_page_{page-1}'))
+    if page < total - 1:
+        buttons.append(InlineKeyboardButton('➡️ Далее', callback_data=f'{action}_page_{page+1}'))
+    buttons.append(InlineKeyboardButton('🔙 Меню', callback_data='select_politician'))
+
+    # Отправляем текст текущей страницы
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=(
+            f"*{name} — {action.upper()} " 
+            f"({page+1}/{total})*\n\n{pages[page]}"
+        ),
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([buttons])
+    )
+
+async def handle_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    # Удаляем предыдущее сообщение перед отправкой новой страницы
+    if update.callback_query.message:
+        await delete_previous_message(update.callback_query.message, context)
+
+    # Разбираем callback_data вида "history_page_2"
+    _, page_str = update.callback_query.data.rsplit('_', 1)
+    await send_page(update, context, int(page_str))
 
 def register_handlers(app):
-    app.add_handler(CallbackQueryHandler(handle_selection, pattern="^select_politician$"))
-    app.add_handler(CallbackQueryHandler(handle_menu_action, pattern="^(history|facts|links|start_game)$"))
-    app.add_handler(CallbackQueryHandler(handle_page_navigation, pattern="^(history|facts|links)_page_\\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_selection,    pattern='^select_politician$'))
+    app.add_handler(CallbackQueryHandler(handle_menu_action,  pattern='^(history|facts|achievements|links|start_game|choose_politician)$'))
+    app.add_handler(CallbackQueryHandler(handle_page,         pattern='^(history|facts|achievements|links)_page_\\d+$'))

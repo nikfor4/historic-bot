@@ -2,70 +2,110 @@ import os
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile
 from telegram.ext import CallbackQueryHandler, ContextTypes
 from services.politician_data import load_all_politicians
-from services.user_state import get_user_state
-from razdel import tokenize
-# game_module.py
+from services.user_state import get_user_state, clear_user_state
+from utils.message_utils import delete_previous_message
 
-async def start_game(update, context, politician):
-    # Запуск игры для политика
-    question_index = 0
-    await show_question(update, context, politician, question_index)
+user_games = {}
 
+async def start_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    if update.callback_query.message:
+        await delete_previous_message(update.callback_query.message, context)
 
-# Функция для показа вопроса в игре
-async def show_question(update, context, politician, question_index):
-    question = politician["game"][question_index]
+    user_id = update.effective_user.id
+    idx = get_user_state(user_id) or 0
+    pol = load_all_politicians()[idx]
+    user_games[user_id] = 'start'
+    await ask_question(update, context, pol, 'start')
 
-    # Создание кнопок выбора
-    kb_buttons = []
-    for i, choice in enumerate(question["choices"]):
-        kb_buttons.append(InlineKeyboardButton(choice["text"], callback_data=f"choice_{question_index}_{i}"))
+async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE, pol: dict, key: str):
+    step = pol['game'].get(key)
+    if not step:
+        return
 
-    kb = InlineKeyboardMarkup([kb_buttons])
+    if update.callback_query and update.callback_query.message:
+        await delete_previous_message(update.callback_query.message, context)
 
-    # Отправка сообщения с вопросом и кнопками выбора
-    await update.callback_query.message.delete()
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(c['text'], callback_data=f"choice|{key}|{i}")]
+        for i, c in enumerate(step.get('choices', []))
+    ])
+
+    img_path = step.get('image') or pol.get('image')
+    caption = f"*{pol['name']} — {step.get('text', '')}*"
+
+    if img_path and os.path.exists(img_path):
+        try:
+            with open(img_path, 'rb') as img:
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=img,
+                    caption=caption,
+                    parse_mode='Markdown',
+                    reply_markup=kb
+                )
+                return
+        except Exception as e:
+            print(f"Error sending photo: {e}")
+
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text=f"*{politician['name']} - Вопрос {question_index + 1}:*\n\n{question['question']}",
-        parse_mode="Markdown",
+        text=caption,
+        parse_mode='Markdown',
         reply_markup=kb
     )
 
-
-# Функция для обработки выбора пользователя в игре
-async def handle_choice(update, context):
+async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
+    if update.callback_query.message:
+        await delete_previous_message(update.callback_query.message, context)
 
-    # Разбор данных из callback_data
-    data = update.callback_query.data
-    _, question_index, choice_index = data.split("_")
+    user_id = update.effective_user.id
+    _, key, idx_s = update.callback_query.data.split('|')
+    choice_idx = int(idx_s)
 
-    question_index = int(question_index)
-    choice_index = int(choice_index)
+    pol_idx = get_user_state(user_id) or 0
+    pol = load_all_politicians()[pol_idx]
+    choice = pol['game'][key]['choices'][choice_idx]
+    next_key = choice['next']
 
-    politician = politicians[0]  # Берём первого политика (по умолчанию)
-    question = politician["game"][question_index]
-    choice = question["choices"][choice_index]
+    if not (isinstance(next_key, str) and next_key.startswith('end_')):
+        user_games[user_id] = str(next_key)
+        await ask_question(update, context, pol, str(next_key))
+        return
 
-    # Отправка результата выбора
-    await update.callback_query.message.delete()
+    # Финал
+    end = pol['game'].get(next_key, {})
+    end_text = end.get('text', 'Конец игры.')
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton('🔙 В меню', callback_data='choose_politician')]])
+    img_path = end.get('image') or pol.get('image')
+    caption = f"*{pol['name']} — Игра окончена*\n\n{end_text}"
+
+    if img_path and os.path.exists(img_path):
+        try:
+            with open(img_path, 'rb') as img:
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=img,
+                    caption=caption,
+                    parse_mode='Markdown',
+                    reply_markup=kb
+                )
+                clear_user_state(user_id)
+                user_games.pop(user_id, None)
+                return
+        except Exception as e:
+            print(f"Error sending photo: {e}")
+
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text=f"*Результат выбора:*\n\n{choice['text']}\n\n{politician['name']} продолжает свою борьбу.",
-        parse_mode="Markdown",
+        text=caption,
+        parse_mode='Markdown',
+        reply_markup=kb
     )
+    clear_user_state(user_id)
+    user_games.pop(user_id, None)
 
-    # Проверка, какой следующий шаг
-    next_step = choice["next"]
-    if isinstance(next_step, int):
-        await show_question(update, context, politician, next_step)
-    else:
-        await end_game(update, context, next_step)
-
-
-async def end_game(update, context, end_condition):
-    if end_condition == "win":
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="Поздравляем! Вы выиграли игру!")
-    else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="Игра окончена.")
+def register_handlers(app):
+    app.add_handler(CallbackQueryHandler(start_game, pattern='^start_game$'))
+    app.add_handler(CallbackQueryHandler(handle_choice, pattern='^choice\\|'))

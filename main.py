@@ -1,19 +1,23 @@
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler
-from handlers import start, choose_politician, politician_menu
-from services import game_engine
-from config import BOT_TOKEN
+import logging
+from telegram.ext import ApplicationBuilder
+import config
+from handlers.start import register_handlers as start_handlers
+from handlers.choose_politician import register_handlers as choose_handlers
+from handlers.politician_menu import register_handlers as menu_handlers
+from handlers.game_module import register_handlers as game_handlers
+
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+    app = ApplicationBuilder().token(config.BOT_TOKEN).build()
 
-    # Подключаем обработчики
-    start.register_start_handlers(app)
-    choose_politician.register_handlers(app)
-    politician_menu.register_handlers(app)
-    game_engine.register_handlers(app)
+    start_handlers(app)
+    choose_handlers(app)
+    menu_handlers(app)
+    game_handlers(app)
 
-    print("🤖 Бот запущен...")
+    print('Bot started...')
     app.run_polling()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

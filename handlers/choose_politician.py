@@ -1,73 +1,68 @@
 import os
-import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile
 from telegram.ext import CallbackQueryHandler, ContextTypes
 from services.politician_data import load_all_politicians
-from services.user_state import get_user_state, set_user_state  # Импортируем функции для работы с состоянием
+from services.user_state import get_user_state, set_user_state
+from utils.message_utils import delete_previous_message
 
 politicians = load_all_politicians()
 
-def build_keyboard(index: int):
-    return InlineKeyboardMarkup([
+async def show_politician(update: Update, context: ContextTypes.DEFAULT_TYPE, index: int):
+    if update.callback_query and update.callback_query.message:
+        await delete_previous_message(update.callback_query.message, context)
+
+    pol = politicians[index]
+    img_path = pol.get('image')
+    kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Выбрать", callback_data="select_politician")],
-        [
-            InlineKeyboardButton("⬅️ Назад", callback_data="prev_politician"),
-            InlineKeyboardButton("➡️ Далее", callback_data="next_politician")
-        ],
-        [InlineKeyboardButton("🔙 Назад в меню", callback_data="start")]
+        [InlineKeyboardButton("⬅️ Назад", callback_data="prev_politician"),
+         InlineKeyboardButton("➡️ Далее", callback_data="next_politician")],
+        [InlineKeyboardButton("🔙 В начало", callback_data="start")]
     ])
 
-async def show_politician(update: Update, context: ContextTypes.DEFAULT_TYPE, index: int):
-    politician = politicians[index]
-    name = politician["name"]
-    image_path = politician.get("image", "")
+    text = f"*{pol['name']}*"
 
-    if not os.path.isabs(image_path):
-        image_path = os.path.abspath(os.path.join(os.getcwd(), image_path))
+    if img_path and os.path.exists(img_path):
+        try:
+            with open(img_path, 'rb') as img:
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=img,
+                    caption=text,
+                    parse_mode='Markdown',
+                    reply_markup=kb
+                )
+                return
+        except Exception as e:
+            print(f"Error sending photo: {e}")
 
-    logging.info(f"Загружается изображение для '{name}': {image_path}")
-
-    if not os.path.exists(image_path):
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Изображение не найдено.")
-        return
-
-    try:
-        with open(image_path, "rb") as f:
-            await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=InputFile(f),
-                caption=f"*{name}*\n\nВыберите, что делать.",
-                parse_mode="Markdown",
-                reply_markup=build_keyboard(index)
-            )
-    except Exception as e:
-        logging.exception("Ошибка при отправке изображения")
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Не удалось отправить изображение.")
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=text,
+        parse_mode='Markdown',
+        reply_markup=kb
+    )
 
 async def handle_choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     user_id = update.effective_user.id
-    index = get_user_state(user_id)  # Используем функцию get_user_state для получения текущего состояния
-    if index is None:
-        index = 0  # Если состояние не найдено, начинаем с первого политика
-    await show_politician(update, context, index)
+    set_user_state(user_id, 0)
+    await show_politician(update, context, 0)
 
 async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     user_id = update.effective_user.id
-    current_index = get_user_state(user_id)  # Получаем текущий индекс
+    idx = get_user_state(user_id) or 0
+    idx = (idx + (1 if update.callback_query.data == 'next_politician' else -1)) % len(politicians)
+    set_user_state(user_id, idx)
+    await show_politician(update, context, idx)
 
-    if current_index is None:
-        current_index = 0  # Если индекс не установлен, начинаем с первого политика
-
-    if update.callback_query.data == "next_politician":
-        new_index = (current_index + 1) % len(politicians)
-    else:
-        new_index = (current_index - 1) % len(politicians)
-
-    set_user_state(user_id, new_index)  # Обновляем состояние пользователя
-    await show_politician(update, context, new_index)
+async def select_politician(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    from handlers.politician_menu import handle_selection
+    await handle_selection(update, context)
 
 def register_handlers(app):
-    app.add_handler(CallbackQueryHandler(handle_choose, pattern="^choose_politician$"))
-    app.add_handler(CallbackQueryHandler(handle_navigation, pattern="^(next_politician|prev_politician)$"))
+    app.add_handler(CallbackQueryHandler(handle_choose,    pattern='^choose_politician$'))
+    app.add_handler(CallbackQueryHandler(handle_navigation,pattern='^(next_politician|prev_politician)$'))
+    app.add_handler(CallbackQueryHandler(select_politician,pattern='^select_politician$'))
